@@ -19,11 +19,21 @@ SequencerNote {
 		var sampleSound = SequencerPlayback(noteBlock, 0);
 		sampleSound.play();
 	}
+
+	transpose { // move a note in time or in pitch
+
+	}
+
+	snap {
+
+	}
 }
 
 SequencerBlock {
 	// collection of SequencerNotes
-	// new block when the scale/tempo changes
+	// essentially an array of SequencerNotes, but enhanced with its own class methods
+
+	// new block e.g. when the scale/tempo changes
 	var <>beatsPerBar, <>duration, <>notes, <>scale, <>color, <>tempo;
 	var <>startingPoint, <>channelNumber;
 	var <>isScaleChange, <>isTempoChange;
@@ -75,9 +85,39 @@ SequencerBlock {
 		notes.removeAt(pos);
 	}
 
-	mouseOn { // which note is the mouse on?
-		|sequencer, mouseX, mouseY|
+	transfer { // move all notes with indices in [this] to [that].
+		// the number of notes between the two blocks should be conserved, not copying!
+		|indices, that|
+		var a = 0;
+		indices = indices.sort;
+		indices.do{
+			|index|
+			that = that.add(this[index - a]);
+			this.removeAt(index - a);
+			a = a + 1;
+		};
 	}
+
+	/*
+	mouseOn { // which note is the mouse on?
+	|sequencer, mouseX, mouseY|
+	}
+
+	transpose { // move all notes together in time or in pitch
+	|superBlock|
+	NotYetImplementedError.throw;
+	}
+
+	moveMargin { // adjust all margins of notes
+	|superBlock|
+	NotYetImplementedError.throw;
+	}
+
+	snap { // snap all notes to the grid
+	|superBlock|
+	NotYetImplementedError.throw;
+	}
+	*/
 }
 
 SequencerTrack {
@@ -344,6 +384,43 @@ Sequencer {
 					};
 				};
 			};
+
+			// draw the selection
+
+			selectionBlock.notes.size.do{
+				arg i;
+				var note = selectionBlock.notes[i];
+				var rectPoint = Point(note.on, note.pitch).penMapping(this);
+				var frameDur = note.dur * view.bounds.width * viewXScale;
+
+				Pen.fillColor = Color.yellow;
+
+				Pen.addRect(
+					Rect.fromPoints(
+						Point(rectPoint.x, rectPoint.y - (rectYWidth / 3)),
+						Point(rectPoint.x + frameDur, rectPoint.y + (rectYWidth / 3))
+					)
+				);
+				Pen.fill;
+
+				editingNoteDurations.if({ // edit duration extenders
+					var l = (note.dur * viewXScale).editRectMarginLength(rectYWidth / view.bounds.width) * view.bounds.width;
+					Pen.fillColor = Color.new(1, 0, 0, 0.4);
+					Pen.addRect(
+						Rect.fromPoints(
+							Point(rectPoint.x, rectPoint.y - (rectYWidth / 3)),
+							Point(rectPoint.x + l, rectPoint.y + (rectYWidth / 3))
+						)
+					);
+					Pen.addRect(
+						Rect.fromPoints(
+							Point(rectPoint.x + (frameDur - l), rectPoint.y - (rectYWidth / 3)),
+							Point(rectPoint.x + frameDur, rectPoint.y + (rectYWidth / 3))
+						)
+					);
+					Pen.fill;
+				});
+			};
 		};
 
 		view.action = {view.refresh};
@@ -404,6 +481,12 @@ Sequencer {
 						selectionYPos = yclick;
 					}
 				});
+			};
+
+			((mouseWhichRect == -1) && (selectionBlock.size != 0)).if {
+				// when something is selected, but nothing is done, free selection
+				// second condition "technically trivial", but included for humans
+				selectionBlock.transfer((0..(selectionBlock.size - 1)), block);
 			};
 
 			([0].includes(m) && (block.notes.size == 0)).if{ // there are no blocks to select, but you can still "select"
@@ -469,13 +552,7 @@ Sequencer {
 
 			// transfer selection to block
 			selectionBlock = SequencerBlock();
-			selectionIndices.do{
-				|i|
-				selectionBlock.add(block[i], false);
-				i.postln;
-			};
-			selectionBlock.size.postln;
-
+			block.transfer(selectionIndices, selectionBlock);
 			selectingNotes = false; // free the selection
 
 			view.refresh;
@@ -751,6 +828,7 @@ SequencerPlayback {
 		var isAbsoluteTime; // in beats or in seconds?
 
 		this.init;
+		playSequence.clear;
 		playStartTime = thisThread.seconds;
 
 		block.size.do{
@@ -822,7 +900,12 @@ SequencerInterval {
 		^super.newCopyArgs(num, den, cents, monzo, subgroup);
 	}
 
-	// because of possible integer overflow, everything is done in terms of monzos.
+	*fromMonzo {
+		|monzo, subgroup|
+		^super.newCopyArgs(nil, nil, nil, monzo, subgroup);
+	}
+
+	// because of possible integer overflow, everything is done in terms of monzos. else, in cents.
 
 	+ { // adding vectors, which is multiplying freq ratios
 		|that|
@@ -840,17 +923,43 @@ SequencerInterval {
 	}
 
 	+/ { // mediant (direct sum), (a/b) +/ (c/d) = (a+c)/(b+d)
+		|that|
 		NotYetImplementedError.throw;
 	}
 
 	asFraction {
-		^this.num / this.den
+		// compute fraction representation of monzo if no integer overflow
+		// return true if possible, false otherwise
+		var a = 1, b = 1, a_int = 1.0, b_int = 1.0;
+		monzo.size.do{
+			|i|
+			(monzo[i] > 0).if{
+				a_int = a_int * subgroup[i].pow(monzo[i]);
+				a = (a + 0.0) * subgroup[i].pow(monzo[i]);
+			};
+			(monzo[i] < 0).if{
+				b_int = b_int * subgroup[i].pow(monzo[i].neg);
+				b = (b + 0.0) * subgroup[i].pow(monzo[i].neg);
+			};
+		};
+		((a <= 2147483647) && (b <= 2147483647)).if({
+			num = a_int;
+			den = b_int;
+			^true;
+		}, {
+			^false;
+		});
+	}
+
+	asCents {
+		NotYetImplementedError.throw;
 	}
 
 	postln {
 		NotYetImplementedError.throw;
 		// if no integer overflow as a fraction, print a fraction.
 		// otherwise, print a monzo.
+		(this.num ++ "/" ++ this.den).postln;
 	}
 }
 
@@ -897,7 +1006,7 @@ SequencerScale {
 		);
 	}
 
-	scaledPenMapping { // mapping points of the Pen to scale (second version), use this if above fails
+	scaledPenMapping { // mapping points of the Pen to scale (w.r.t canvas coordinates), use this if above fails
 		|seq|
 		^Point(
 			seq.view.bounds.width * (this.x - seq.displayXOffset),
