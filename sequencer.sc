@@ -1,5 +1,3 @@
-// TODO: transform the Points, not the Pen
-
 SequencerNote {
 	// on: start of the note in beats
 	// dur: duration of the note in beats
@@ -29,9 +27,17 @@ SequencerBlock {
 	var <>beatsPerBar, <>duration, <>notes, <>scale, <>color, <>tempo;
 	var <>startingPoint, <>channelNumber;
 	var <>isScaleChange, <>isTempoChange;
-	var <>isDisplayable; // some blocks aren't displayable, like a selection of notes
+	var <>isDisplayable;
+	// some blocks aren't displayable, like a selection of notes (abstracted into a list)
+	// only the "notes" variable is meaningful in a selection
 
 	*new { |beats, durat, notes, scale, color, tempo|
+		(beats == nil).if{
+			beats = 0;
+		};
+		(durat == nil).if{
+			durat = 0;
+		};
 		(notes == nil).if{
 			notes = [];
 		};
@@ -57,9 +63,11 @@ SequencerBlock {
 	}
 
 	add { // add note at the end of the list
-		|note|
+		|note, playSample = false|
 		notes = notes.add(note);
-		note.sample();
+		playSample.if{
+			note.sample();
+		};
 	}
 
 	removeAt { // remove note at position...
@@ -76,15 +84,22 @@ SequencerTrack {
 	// collection of SequencerBlocks
 }
 
+SequencerLabel {
+	// on-screen labeling of elements.
+	// examples: lyrics, chord symbols, "overtone" drawing of rooted chords, etc.
+}
+
 Sequencer {
+	// visual elements
 	var <>window, <>block; // currently can only support one block
+	var selectionBlock; // block of the selection. useful when there are multiple of them.
 
 	var windowIsFront = true;
 
 	// screen elements
 
 	var <view; // main view, currently can only support one main view
-	var tickerView, selectionView;
+	var tickerView;
 
 	var <blockScale;
 
@@ -99,6 +114,8 @@ Sequencer {
 	displayYOffset = -1*viewYScale/7;
 	*/
 
+	// internal variables
+
 	var freqLowest = 16, freqHighest = 4096;
 	var baseFreq = 220;
 
@@ -106,7 +123,11 @@ Sequencer {
 	var mouseXDiff, mouseYDiff;
 	var mouseWhichRect = -1, mouseRectMargin = 0;
 	var cursorDuration = 0.25;
-	var <displayXQuant = 0.25;
+	var <displayXQuant = 0.25; // snapMapping needs to read this
+
+	var selectionIndices;
+
+	var selectionXPos, selectionYPos; // upper left corner of selection
 
 	// non-screen elements
 
@@ -117,11 +138,9 @@ Sequencer {
 	var saveButton, loadButton;
 	var durationDialogBoxNum, durationDialogBoxDen, subbeatsPerBeatsDialogBox;
 
-	var editingNoteDurations = true;
-
 	// states
 
-	var addingNotes = false, editingNoteDurations = false;
+	var addingNotes = false, selectingNotes = false, editingNoteDurations = false;
 	var ctrlPressed = false;
 
 	// playback variables
@@ -158,6 +177,7 @@ Sequencer {
 
 
 		// draw the views
+		// note that Pen can only be called within drawFunc!
 
 		view.drawFunc = {
 			this.updateStates();
@@ -194,7 +214,7 @@ Sequencer {
 
 			9.do{
 				arg i2;
-				var i = i2-3;
+				var i = i2-4;
 				(blockScale.size).do{
 					arg j;
 					var yy = (log2(blockScale[j % blockScale.size]) + i);
@@ -285,7 +305,45 @@ Sequencer {
 
 				pitchSlider.value = (displayYOffset + (lowerRange * viewYScale)) / (totalRange * viewYScale - 1);
 				pitchSlider.thumbSize = view.bounds.height / viewYScale / totalRange;
-			}
+			};
+
+			// selections
+
+			(selectingNotes).if{
+				selectionIndices = [];
+
+				not(selectionXPos.isNil || selectionYPos.isNil || mouseXPos.isNil || mouseYPos.isNil).if{
+					var upperLeft = Point(selectionXPos, selectionYPos).scaledPenMapping(this);
+					var lowerRight = Point(mouseXPos, mouseYPos).scaledPenMapping(this);
+					var selectionRect = Rect.fromPoints(upperLeft, lowerRight);
+
+					// draw selection rectangle
+
+					Pen.fillColor = Color.new(0, 0.8, 0.8, 0.2);
+					Pen.addRect(selectionRect);
+					Pen.fill;
+
+					block.notes.size.do{ // find selection matches
+						arg i;
+						var note = block.notes[i];
+						var rectPoint = Point(note.on, note.pitch).penMapping(this);
+						var frameDur = note.dur * view.bounds.width * viewXScale;
+
+						var compare = Rect.fromPoints(
+							Point(rectPoint.x, rectPoint.y - (rectYWidth / 3)),
+							Point(rectPoint.x + frameDur, rectPoint.y + (rectYWidth / 3)) // no idea why it's 3 and not 2
+						);
+
+						selectionRect.intersects(compare).if{
+							selectionIndices = selectionIndices.add(i);
+
+							Pen.fillColor = Color.yellow;
+							Pen.addRect(compare);
+							Pen.fill;
+						}
+					};
+				};
+			};
 		};
 
 		view.action = {view.refresh};
@@ -296,62 +354,67 @@ Sequencer {
 				arg x, y, rx, ry, lx, ly;
 				(rx <= x) && (x <= (rx + lx)) && (ry <= y) && (y <= (ry + ly))
 			};
-			var xclick, yclick;
+			var xclick = (x).linlin(0, view.bounds.width, 0, 1) + displayXOffset;
+			var yclick = 1 - (y).linlin(0, view.bounds.height, 0, 1) + displayYOffset;
 			var j = 0;
-			([0].includes(m) && (block.notes.size != 0)).if{ // restrict to no modifier
-				xclick = (x).linlin(0, view.bounds.width, 0, 1) + displayXOffset;
-				yclick = 1 - (y).linlin(0, view.bounds.height, 0, 1) + displayYOffset;
-				try{ // find index of selected note
-					var note = block.notes[j];
-					yclick.postln;
-					(note.pitch * viewYScale - (normalizedRectYWidth * 1)).postln;
-					(note.pitch * viewYScale + (normalizedRectYWidth * 1)).postln;
-					while({
-						(j < block.notes.size) &&
-						not(withinRect.value(xclick, yclick,
-							note.on * viewXScale, (note.pitch * viewYScale - (normalizedRectYWidth * 1/2)),
-							note.dur * viewXScale, normalizedRectYWidth
-						))
-					}, {
-						j = j + 1;
-						(j != block.notes.size).if{
-							note = block.notes[j];
-						}
+			([0].includes(m) && (block.notes.size != 0)).if{ // there is more than no blocks on the screen
+				var note = block.notes[j]; // find index of selected note
+				while({
+					(j < block.notes.size) &&
+					not(withinRect.value(xclick, yclick,
+						note.on * viewXScale, (note.pitch * viewYScale - (normalizedRectYWidth * 1/2)),
+						note.dur * viewXScale, normalizedRectYWidth
+					))
+				}, {
+					j = j + 1;
+					(j != block.notes.size).if{
+						note = block.notes[j];
 					}
-					);
-					(j < block.notes.size).if({
-						var note = block.notes[j];
-						var l = (note.dur * viewXScale).editRectMarginLength(normalizedRectYWidth);
-						mouseWhichRect = j;
-						mouseXDiff = xclick - (note.on * viewXScale);
-						mouseYDiff = yclick - (note.pitch * viewYScale);
-						// find dragged margin
-						withinRect.value(xclick, yclick,
-							note.on * viewXScale, note.pitch * viewYScale - (normalizedRectYWidth * 1/2),
-							l, normalizedRectYWidth
-						).if({
-							mouseRectMargin = -1;
-						}, {withinRect.value(xclick, yclick,
-							(note.on + note.dur) * viewXScale - l, note.pitch * viewYScale - (normalizedRectYWidth * 1/2),
-							l, normalizedRectYWidth
-						).if({
-							mouseRectMargin = 1;
-						}, {
-							mouseRectMargin = 0;
-						});
-						});
-						true.if({
-							note.sample();
-						});
+				}
+				);
+				(j < block.notes.size).if({
+					var note = block.notes[j];
+					var l = (note.dur * viewXScale).editRectMarginLength(normalizedRectYWidth);
+					mouseWhichRect = j;
+					mouseXDiff = xclick - (note.on * viewXScale);
+					mouseYDiff = yclick - (note.pitch * viewYScale);
+					// find dragged margin
+					withinRect.value(xclick, yclick,
+						note.on * viewXScale, note.pitch * viewYScale - (normalizedRectYWidth * 1/2),
+						l, normalizedRectYWidth
+					).if({
+						mouseRectMargin = -1; // left
+					}, {withinRect.value(xclick, yclick,
+						(note.on + note.dur) * viewXScale - l, note.pitch * viewYScale - (normalizedRectYWidth * 1/2),
+						l, normalizedRectYWidth
+					).if({
+						mouseRectMargin = 1; // right
 					}, {
-						mouseWhichRect = -1;
+						mouseRectMargin = 0; // none (center)
 					});
-				} {
-					|error|
-					error.throw;
-					mouseWhichRect = -1;
-				};
+					});
+					true.if({
+						note.sample();
+					});
+				}, {
+					mouseWhichRect = -1; // not dragging a block, maybe selecting blocks?
+					not(addingNotes).if{
+						selectingNotes = true;
+						selectionXPos = xclick;
+						selectionYPos = yclick;
+					}
+				});
 			};
+
+			([0].includes(m) && (block.notes.size == 0)).if{ // there are no blocks to select, but you can still "select"
+				mouseWhichRect = -1;
+				not(addingNotes).if{
+					selectingNotes = true;
+					selectionXPos = xclick;
+					selectionYPos = yclick;
+				}
+			};
+
 			view.refresh;
 		};
 
@@ -372,15 +435,15 @@ Sequencer {
 			yclick = 1 - (y).linlin(0, view.bounds.height, 0, 1) + displayYOffset;
 			mouseXPos = xclick;
 			mouseYPos = yclick;
-			([0].includes(m) && (mouseWhichRect >= 0)).if{ // drag rect
+			([0].includes(m) && (mouseWhichRect >= 0)).if{ // dragging a rectangle
 				var note = block.notes[mouseWhichRect];
 				case
-				{mouseRectMargin == -1 && editingNoteDurations} {
+				{mouseRectMargin == -1 && editingNoteDurations} { // left
 					var xx = note.on + note.dur;
 					note.on = (xclick / viewXScale).trunc(displayXQuant).clip(-inf, xx);
 					note.dur = (xx - note.on);
 				}
-				{mouseRectMargin == 1 && editingNoteDurations} {
+				{mouseRectMargin == 1 && editingNoteDurations} { // right
 					note.dur = (xclick / viewXScale - note.on).trunc(displayXQuant).clip(0, inf);
 				}
 				{
@@ -395,11 +458,34 @@ Sequencer {
 			view.doAction;
 		};
 
+		view.mouseUpAction = {
+			(mouseWhichRect < 0 && addingNotes).if({ // add note
+				var xx, yy;
+				xx = (mouseXPos / viewXScale).trunc(displayXQuant);
+				yy = mouseYPos / viewYScale;
+				yy = yy.snap(blockScale);
+				block.add(SequencerNote(xx, yy, cursorDuration), true);
+			});
+
+			// transfer selection to block
+			selectionBlock = SequencerBlock();
+			selectionIndices.do{
+				|i|
+				selectionBlock.add(block[i], false);
+				i.postln;
+			};
+			selectionBlock.size.postln;
+
+			selectingNotes = false; // free the selection
+
+			view.refresh;
+			window.refresh;
+		};
+
 		view.keyDownAction = {
 			|doc, char, mod, unicode, keycode, key|
 			(key == 16777249).if{
 				ctrlPressed = true;
-				ctrlPressed.postln;
 			};
 			(key == 16777223).if{
 				this.deleteNote();
@@ -411,18 +497,6 @@ Sequencer {
 			(key == 16777249).if{
 				ctrlPressed = false;
 			};
-		};
-
-		view.mouseUpAction = {
-			(mouseWhichRect < 0 && addingNotes).if({
-				var xx, yy;
-				xx = (mouseXPos / viewXScale).trunc(displayXQuant);
-				yy = mouseYPos / viewYScale;
-				yy = yy.snap(blockScale);
-				block.add(SequencerNote(xx, yy, cursorDuration));
-			});
-			view.refresh;
-			window.refresh;
 		};
 
 		view.mouseWheelAction = {
@@ -607,6 +681,7 @@ Sequencer {
 
 		(addNoteButton.value == 1).if({
 			addingNotes = true;
+			selectingNotes = false;
 		}, {
 			addingNotes = false;
 		});
@@ -693,7 +768,7 @@ SequencerPlayback {
 	}
 
 	pause {
-
+		NotYetImplementedError.throw;
 	}
 
 	stop {
@@ -703,50 +778,79 @@ SequencerPlayback {
 }
 
 SequencerInterval {
-	var <>num, <>den;
-	var <>monzo, <>subgroup;
-	var isFraction, isCents, isMonzo;
+	var <num, <den, <cents;
+	var <monzo, <subgroup;
+	var <isFraction, <isCents, <isMonzo;
 
 	*new {
-		|numerator, denominator|
-		denominator.isNil.if{
-			denominator = 1
+		|num, den|
+		var cents, monzo, subgroup;
+		den.isNil.if{
+			den = 1
 		};
-		^super.newCopyArgs(numerator, denominator)
+
+		// if reducible, reduce.
+		num = num.div(gcd(num, den));
+		den = den.div(gcd(num, den));
+
+		// convert to cents. easy!
+		cents = log(num/den) * 1731.2340490668;
+
+		// convert to monzo. hard...
+		monzo = []; subgroup = [];
+		num.factors.do{
+			|n|
+			subgroup.includes(n).if({
+				var j = subgroup.indexOf(n);
+				monzo[j] = monzo[j] + 1;
+			}, {
+				subgroup = subgroup.add(n);
+				monzo = monzo.add(1);
+			});
+		};
+		den.factors.do{
+			|n|
+			subgroup.includes(n).if({
+				var j = subgroup.indexOf(n);
+				monzo[j] = monzo[j] - 1;
+			}, {
+				subgroup = subgroup.add(n);
+				monzo = monzo.add(-1);
+			});
+		};
+
+		^super.newCopyArgs(num, den, cents, monzo, subgroup);
 	}
 
-	* {
+	// because of possible integer overflow, everything is done in terms of monzos.
+
+	+ { // adding vectors, which is multiplying freq ratios
 		|that|
-		var result, a_, b_, d_;
-		a_ = this.num * that.num;
-		b_ = this.den * that.den;
-		d_ = gcd(a_, b_);
-		^SequencerInterval.new(a_.div(d_), b_.div(d_))
+		NotYetImplementedError.throw;
 	}
 
-	/ {
+	- { // subtracting vectors, which is dividing freq ratios
 		|that|
-		var result, a_, b_, d_;
-		a_ = this.num * that.num;
-		b_ = this.den * that.den;
-		d_ = gcd(a_, b_);
-		^SequencerInterval.new(a_.div(d_), b_.div(d_))
+		NotYetImplementedError.throw;
 	}
 
-	& {
-		|that|
-	}
-
-	pow {
+	* { // multiplying vectors by integer scalar, which is exponentiating freq ratios
 		|number|
+		NotYetImplementedError.throw;
 	}
 
-	value {
+	+/ { // mediant (direct sum), (a/b) +/ (c/d) = (a+c)/(b+d)
+		NotYetImplementedError.throw;
+	}
+
+	asFraction {
 		^this.num / this.den
 	}
 
 	postln {
-		(this.num + "/" + this.den).postln
+		NotYetImplementedError.throw;
+		// if no integer overflow as a fraction, print a fraction.
+		// otherwise, print a monzo.
 	}
 }
 
@@ -790,6 +894,14 @@ SequencerScale {
 		^Point(
 			seq.view.bounds.width * (this.x * seq.viewXScale - seq.displayXOffset),
 			seq.view.bounds.height * (1 - (this.y * seq.viewYScale) + seq.displayYOffset)
+		);
+	}
+
+	scaledPenMapping { // mapping points of the Pen to scale (second version), use this if above fails
+		|seq|
+		^Point(
+			seq.view.bounds.width * (this.x - seq.displayXOffset),
+			seq.view.bounds.height * (1 - this.y + seq.displayYOffset)
 		);
 	}
 
