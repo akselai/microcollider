@@ -212,6 +212,9 @@ Sequencer {
 
 		blockScale = block.scale;
 
+		selectionBlock = SequencerBlock();
+		selectionIndices = [];
+
 		// rescale views on dragging window
 
 
@@ -282,7 +285,6 @@ Sequencer {
 				var note = block.notes[i];
 				var rectPoint = Point(note.on, note.pitch).penMapping(this);
 				var frameDur = note.dur * view.bounds.width * viewXScale;
-
 				(i == mouseWhichRect).if({
 					Pen.fillColor = Color.yellow;
 				}, {
@@ -386,7 +388,6 @@ Sequencer {
 			};
 
 			// draw the selection
-
 			selectionBlock.notes.size.do{
 				arg i;
 				var note = selectionBlock.notes[i];
@@ -433,46 +434,53 @@ Sequencer {
 			};
 			var xclick = (x).linlin(0, view.bounds.width, 0, 1) + displayXOffset;
 			var yclick = 1 - (y).linlin(0, view.bounds.height, 0, 1) + displayYOffset;
-			var j = 0;
-			([0].includes(m) && (block.notes.size != 0)).if{ // there is more than no blocks on the screen
-				var note = block.notes[j]; // find index of selected note
+			var i = 0;
+			([0].includes(m) && (block.notes.size != 0)).if{ // there is more than 0 blocks on the screen
+				var note = block.notes[i]; // find index of selected note
 				while({
-					(j < block.notes.size) &&
+					(i < block.notes.size) &&
 					not(withinRect.value(xclick, yclick,
 						note.on * viewXScale, (note.pitch * viewYScale - (normalizedRectYWidth * 1/2)),
 						note.dur * viewXScale, normalizedRectYWidth
 					))
 				}, {
-					j = j + 1;
-					(j != block.notes.size).if{
-						note = block.notes[j];
-					}
-				}
-				);
-				(j < block.notes.size).if({
-					var note = block.notes[j];
+					note = block.notes[i];
+					i = i + 1;
+				});
+
+				(i == block.notes.size).if{i = -1}; // end of search
+
+				(i > 0).if{i = i - 1};
+
+				(i != -1).if({
+					var note = block.notes[i];
 					var l = (note.dur * viewXScale).editRectMarginLength(normalizedRectYWidth);
-					mouseWhichRect = j;
+					mouseWhichRect = i;
 					mouseXDiff = xclick - (note.on * viewXScale);
 					mouseYDiff = yclick - (note.pitch * viewYScale);
+
+					selectingNotes = false;
+					selectionXPos = xclick;
+					selectionYPos = yclick;
+
 					// find dragged margin
+
+					mouseRectMargin = 0; // none (center)
+
 					withinRect.value(xclick, yclick,
 						note.on * viewXScale, note.pitch * viewYScale - (normalizedRectYWidth * 1/2),
 						l, normalizedRectYWidth
-					).if({
+					).if{
 						mouseRectMargin = -1; // left
-					}, {withinRect.value(xclick, yclick,
+					};
+					withinRect.value(xclick, yclick,
 						(note.on + note.dur) * viewXScale - l, note.pitch * viewYScale - (normalizedRectYWidth * 1/2),
 						l, normalizedRectYWidth
-					).if({
+					).if{
 						mouseRectMargin = 1; // right
-					}, {
-						mouseRectMargin = 0; // none (center)
-					});
-					});
-					true.if({
-						note.sample();
-					});
+					};
+
+					note.sample();
 				}, {
 					mouseWhichRect = -1; // not dragging a block, maybe selecting blocks?
 					not(addingNotes).if{
@@ -483,11 +491,13 @@ Sequencer {
 				});
 			};
 
-			((mouseWhichRect == -1) && (selectionBlock.size != 0)).if {
+			((mouseWhichRect == -1) && (selectionBlock.size != 0)).if({
 				// when something is selected, but nothing is done, free selection
-				// second condition "technically trivial", but included for humans
 				selectionBlock.transfer((0..(selectionBlock.size - 1)), block);
-			};
+			}, {
+				// when something is selected, and a block is dragged, move all blocks by the same amount
+				// see mouseMoveAction
+			});
 
 			([0].includes(m) && (block.notes.size == 0)).if{ // there are no blocks to select, but you can still "select"
 				mouseWhichRect = -1;
@@ -518,7 +528,9 @@ Sequencer {
 			yclick = 1 - (y).linlin(0, view.bounds.height, 0, 1) + displayYOffset;
 			mouseXPos = xclick;
 			mouseYPos = yclick;
-			([0].includes(m) && (mouseWhichRect >= 0)).if{ // dragging a rectangle
+
+			// dragging a rectangle
+			([0].includes(m) && (mouseWhichRect >= 0)).if{
 				var note = block.notes[mouseWhichRect];
 				case
 				{mouseRectMargin == -1 && editingNoteDurations} { // left
@@ -529,20 +541,43 @@ Sequencer {
 				{mouseRectMargin == 1 && editingNoteDurations} { // right
 					note.dur = (xclick / viewXScale - note.on).trunc(displayXQuant).clip(0, inf);
 				}
-				{
+				{ // center
 					var xx, yy;
 					xx = ((xclick - mouseXDiff) / viewXScale).trunc(displayXQuant);
-					note.on = xx;
-					yy = (yclick - mouseYDiff) / viewYScale;
-					yy = yy.snap(blockScale);
-					note.pitch = yy;
+					yy = ((yclick - mouseYDiff) / viewYScale).snap(blockScale);
+					note.on = xx;  note.pitch = yy;
+				}
+			};
+
+			// dragging a selection
+			(selectionBlock.size != 0 && (mouseWhichRect >= 0)).if{
+				var pivotNote = block.notes[mouseWhichRect];
+				case
+				{mouseRectMargin == -1 && editingNoteDurations} { // left
+					// TODO: put something here!!!
+				}
+				{mouseRectMargin == 1 && editingNoteDurations} { // right
+					// TODO: put something here!!!
+				}
+				{ // center
+					var origX, origY, newX, newY;
+					origX = selectionXPos;
+					origY = selectionYPos;
+					newX = ((xclick - mouseXDiff) / viewXScale).trunc(displayXQuant);
+					newY = ((yclick - mouseYDiff) / viewYScale).snap(blockScale);
+					// note.on = xx;  note.pitch = yy;
+					\beep.postln;
+					origX.postln;
+					origY.postln;
+					newX.postln;
+					newY.postln;
 				}
 			};
 			view.doAction;
 		};
 
 		view.mouseUpAction = {
-			(mouseWhichRect < 0 && addingNotes).if({ // add note
+			(mouseWhichRect == -1 && addingNotes).if({ // add note
 				var xx, yy;
 				xx = (mouseXPos / viewXScale).trunc(displayXQuant);
 				yy = mouseYPos / viewYScale;
@@ -905,21 +940,56 @@ SequencerInterval {
 		^super.newCopyArgs(nil, nil, nil, monzo, subgroup);
 	}
 
+	isInterval { ^true }
+
 	// because of possible integer overflow, everything is done in terms of monzos. else, in cents.
 
 	+ { // adding vectors, which is multiplying freq ratios
 		|that|
-		NotYetImplementedError.throw;
+		var combineSubgroups = this.subgroup.asSet | that.subgroup.asSet;
+		var resultMonzo = [], resultSubgroup = [];
+		combineSubgroups = combineSubgroups.asArray.sort;
+		combineSubgroups.do{
+			|prime|
+			(this.subgroup.includes(prime) && that.subgroup.includes(prime)).if({
+				var i = this.subgroup.indexOf(prime);
+				var j = that.subgroup.indexOf(prime);
+				var sum = this.monzo[i] + that.monzo[j];
+				(sum != 0).if{
+					resultMonzo = resultMonzo.add(sum);
+					resultSubgroup = resultSubgroup.add(prime);
+				}
+			}, {
+				(this.subgroup.includes(prime)).if{
+					var i = this.subgroup.indexOf(prime);
+					resultMonzo = resultMonzo.add(this.monzo[i]);
+					resultSubgroup = resultSubgroup.add(prime);
+				};
+				(that.subgroup.includes(prime)).if{
+					var j = that.subgroup.indexOf(prime);
+					resultMonzo = resultMonzo.add(that.monzo[j]);
+					resultSubgroup = resultSubgroup.add(prime);
+				};
+			});
+		};
+		^SequencerInterval.fromMonzo(resultMonzo, resultSubgroup)
 	}
 
 	- { // subtracting vectors, which is dividing freq ratios
 		|that|
-		NotYetImplementedError.throw;
+		^this + (that * (-1))
 	}
 
 	* { // multiplying vectors by integer scalar, which is exponentiating freq ratios
 		|number|
-		NotYetImplementedError.throw;
+		number.isInteger.if({
+			^SequencerInterval.fromMonzo(this.monzo * number, this.subgroup)
+		}, {
+			error("binary operator '*' failed, attempt to multiply monzo by a non-integer: %".format(number));
+			this.dump;
+			this.dumpBackTrace;
+			this.halt;
+		})
 	}
 
 	+/ { // mediant (direct sum), (a/b) +/ (c/d) = (a+c)/(b+d)
@@ -959,7 +1029,7 @@ SequencerInterval {
 		NotYetImplementedError.throw;
 		// if no integer overflow as a fraction, print a fraction.
 		// otherwise, print a monzo.
-		(this.num ++ "/" ++ this.den).postln;
+		// (this.num ++ "/" ++ this.den).postln;
 	}
 }
 
@@ -969,12 +1039,24 @@ SequencerScale {
 	var <>colors;
 
 	*new {
-		|invls|
-		^super.newCopyArgs(invls);
+		|intervals, colors|
+		colors.isNil.if{
+			colors = Color.gray(0.5, 1.0)!intervals.size;
+		};
+		^super.newCopyArgs(intervals, colors);
 	}
 
-	*newScala {
+	*fromScala {
 		|invls|
+		NotYetImplementedError.throw;
+	}
+
+	sort {
+		NotYetImplementedError.throw;
+	}
+
+	reduce { // last element is equave
+		NotYetImplementedError.throw;
 	}
 }
 
@@ -998,7 +1080,7 @@ SequencerScale {
 }
 
 + Point {
-	penMapping { // mapping points of the Pen to scale
+	penMapping { // mapping points: canvas coordinates (full length = 1) -> # of pixels
 		|seq|
 		^Point(
 			seq.view.bounds.width * (this.x * seq.viewXScale - seq.displayXOffset),
@@ -1006,7 +1088,7 @@ SequencerScale {
 		);
 	}
 
-	scaledPenMapping { // mapping points of the Pen to scale (w.r.t canvas coordinates), use this if above fails
+	scaledPenMapping { // mapping points: canvas coordinates (full length = 1) -> map coordinates (full length = X/YScale)
 		|seq|
 		^Point(
 			seq.view.bounds.width * (this.x - seq.displayXOffset),
@@ -1014,7 +1096,7 @@ SequencerScale {
 		);
 	}
 
-	snapMapping { // mapping points of the mouse to scale, snapped to grid
+	snapMapping { // mapping points to scale, snapped to grid (with the above coords)
 		|seq|
 		var x_ = seq.viewXScale;
 		var y_ = seq.viewYScale;
@@ -1024,3 +1106,5 @@ SequencerScale {
 		);
 	}
 }
+
+// TODO: make inverse methods and replace seperate X/Y coordinates with Points
